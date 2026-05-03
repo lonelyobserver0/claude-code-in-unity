@@ -137,5 +137,161 @@ async def instantiate_prefab(path: str, name: str | None = None) -> dict[str, An
     return await _send("/instantiate_prefab", payload)
 
 
+@mcp.tool()
+async def add_component(object_id: int, component: str) -> dict[str, Any]:
+    """Add a Component to a GameObject by type name (e.g. 'Rigidbody', 'BoxCollider', 'UnityEngine.Light').
+
+    Resolves the type across all loaded assemblies, so MonoBehaviour subclasses also work.
+    """
+    return await _send("/add_component", {"id": object_id, "component": component})
+
+
+@mcp.tool()
+async def remove_component(object_id: int, component: str) -> dict[str, Any]:
+    """Remove a Component from a GameObject by type name. Transform cannot be removed."""
+    return await _send("/remove_component", {"id": object_id, "component": component})
+
+
+@mcp.tool()
+async def find_object(name: str | None = None, path: str | None = None) -> dict[str, Any]:
+    """Locate a GameObject in the active scene.
+
+    Pass either `path` (slash-separated hierarchy, e.g. 'Player/Body/Head')
+    or `name` (recursive name match starting from scene roots).
+    """
+    payload: dict[str, Any] = {}
+    if path is not None:
+        payload["path"] = path
+    if name is not None:
+        payload["name"] = name
+    return await _send("/find_object", payload)
+
+
+@mcp.tool()
+async def get_children(object_id: int) -> dict[str, Any]:
+    """List the direct children of a GameObject (id, name, hierarchy path)."""
+    return await _send("/get_children", {"id": object_id})
+
+
+@mcp.tool()
+async def set_parent(
+    object_id: int,
+    parent_id: int | None = None,
+    world_position_stays: bool = True,
+) -> dict[str, Any]:
+    """Reparent a GameObject. Pass `parent_id=None` to detach to scene root.
+
+    world_position_stays=False resets local transform to identity after reparenting.
+    """
+    payload: dict[str, Any] = {"id": object_id, "world_position_stays": world_position_stays}
+    if parent_id is not None:
+        payload["parent_id"] = parent_id
+    return await _send("/set_parent", payload)
+
+
+@mcp.tool()
+async def set_active(object_id: int, active: bool) -> dict[str, Any]:
+    """Enable/disable a GameObject (equivalent to ticking the checkbox in the Inspector)."""
+    return await _send("/set_active", {"id": object_id, "active": active})
+
+
+@mcp.tool()
+async def set_tag(object_id: int, tag: str) -> dict[str, Any]:
+    """Set the tag of a GameObject. The tag must already be defined in TagManager."""
+    return await _send("/set_tag", {"id": object_id, "tag": tag})
+
+
+@mcp.tool()
+async def set_layer(object_id: int, layer: int | str) -> dict[str, Any]:
+    """Set the layer of a GameObject. Accepts an int (0-31) or a layer name."""
+    return await _send("/set_layer", {"id": object_id, "layer": layer})
+
+
+@mcp.tool()
+async def save_scene(path: str | None = None) -> dict[str, Any]:
+    """Save the active scene. If `path` is provided, save-as to that asset path."""
+    payload: dict[str, Any] = {}
+    if path is not None:
+        payload["path"] = path
+    return await _send("/save_scene", payload)
+
+
+@mcp.tool()
+async def open_scene(path: str, mode: str = "Single") -> dict[str, Any]:
+    """Open a scene from disk.
+
+    mode: 'Single' | 'Additive' | 'AdditiveWithoutLoading'.
+    Note: unsaved changes in the current scene are NOT auto-saved.
+    """
+    return await _send("/open_scene", {"path": path, "mode": mode})
+
+
+@mcp.tool()
+async def new_scene(setup: str = "DefaultGameObjects") -> dict[str, Any]:
+    """Create a new scene, replacing the current one.
+
+    setup: 'DefaultGameObjects' (with default camera+light) | 'EmptyScene'.
+    """
+    return await _send("/new_scene", {"setup": setup})
+
+
+@mcp.tool()
+async def get_scene_info() -> dict[str, Any]:
+    """Return name, path, dirty flag, root count, and build index of the active scene."""
+    return await _send("/get_scene_info")
+
+
+@mcp.tool()
+async def select_object(object_id: int, frame: bool = False) -> dict[str, Any]:
+    """Select a GameObject in the Hierarchy and ping it. If `frame=True`, frame it in the Scene view."""
+    return await _send("/select_object", {"id": object_id, "frame": frame})
+
+
+@mcp.tool()
+async def execute_menu_item(menu_path: str) -> dict[str, Any]:
+    """Execute any Unity Editor menu item by its path.
+
+    Examples:
+        execute_menu_item('GameObject/3D Object/Cube')
+        execute_menu_item('Assets/Refresh')
+        execute_menu_item('File/Save Project')
+    """
+    return await _send("/execute_menu_item", {"menu_path": menu_path})
+
+
+@mcp.tool()
+async def set_play_mode(state: str) -> dict[str, Any]:
+    """Control Editor play mode.
+
+    state: 'play' | 'stop' | 'pause' | 'unpause'.
+    """
+    return await _send("/set_play_mode", {"state": state})
+
+
+@mcp.tool()
+async def get_play_mode() -> dict[str, Any]:
+    """Return play/pause/compile/asset-update flags of the Editor."""
+    return await _send("/get_play_mode")
+
+
+@mcp.tool()
+async def get_console_logs(limit: int = 100, severity: str | None = None) -> dict[str, Any]:
+    """Read the most recent Unity console logs captured since the bridge started.
+
+    severity (optional): 'Log' | 'Warning' | 'Error' | 'Exception' | 'Assert'.
+    The buffer keeps the last 1000 entries in-memory.
+    """
+    payload: dict[str, Any] = {"limit": limit}
+    if severity is not None:
+        payload["severity"] = severity
+    return await _send("/get_console_logs", payload)
+
+
+@mcp.tool()
+async def clear_console_logs() -> dict[str, Any]:
+    """Clear the bridge's in-memory log buffer (does not affect Unity's own console)."""
+    return await _send("/clear_console_logs")
+
+
 if __name__ == "__main__":
     mcp.run()

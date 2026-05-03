@@ -21,6 +21,7 @@ public static class McpBridgeBootstrap
         AssemblyReloadEvents.beforeAssemblyReload += McpBridgeServer.Stop;
         EditorApplication.quitting += McpBridgeServer.Stop;
         EditorApplication.update += McpBridgeServer.PumpMainThread;
+        McpLogBuffer.Register();
 
         if (EditorPrefs.GetBool(McpBridgeServer.AutoStartPrefKey, false))
         {
@@ -256,6 +257,24 @@ public static class McpBridgeServer
             case "/set_component_property": return McpCommands.SetComponentProperty(data);
             case "/instantiate_prefab":     return McpCommands.InstantiatePrefab(data);
             case "/list_scene_objects":     return McpCommands.ListSceneObjects();
+            case "/add_component":          return McpCommands.AddComponent(data);
+            case "/remove_component":       return McpCommands.RemoveComponent(data);
+            case "/find_object":            return McpCommands.FindObject(data);
+            case "/get_children":           return McpCommands.GetChildren(data);
+            case "/set_parent":             return McpCommands.SetParent(data);
+            case "/set_active":             return McpCommands.SetActive(data);
+            case "/set_tag":                return McpCommands.SetTag(data);
+            case "/set_layer":              return McpCommands.SetLayer(data);
+            case "/save_scene":             return McpCommands.SaveScene(data);
+            case "/open_scene":             return McpCommands.OpenScene(data);
+            case "/new_scene":              return McpCommands.NewScene(data);
+            case "/get_scene_info":         return McpCommands.GetSceneInfo();
+            case "/select_object":          return McpCommands.SelectObject(data);
+            case "/execute_menu_item":      return McpCommands.ExecuteMenuItem(data);
+            case "/set_play_mode":          return McpCommands.SetPlayMode(data);
+            case "/get_play_mode":          return McpCommands.GetPlayMode();
+            case "/get_console_logs":       return McpCommands.GetConsoleLogs(data);
+            case "/clear_console_logs":     return McpCommands.ClearConsoleLogs();
             default: return JsonConvert.SerializeObject(new { error = $"Unknown path: {path}" });
         }
     }
@@ -441,6 +460,332 @@ internal static class McpCommands
         return JsonConvert.SerializeObject(new { objects });
     }
 
+    public static string AddComponent(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+
+        string componentName = (string)data["component"];
+        if (string.IsNullOrEmpty(componentName))
+            return JsonConvert.SerializeObject(new { error = "component is required" });
+
+        var type = ResolveComponentType(componentName);
+        if (type == null)
+            return JsonConvert.SerializeObject(new { error = $"Component type '{componentName}' not found in any loaded assembly" });
+
+        Component added;
+        try { added = Undo.AddComponent(obj, type); }
+        catch (Exception ex) { return JsonConvert.SerializeObject(new { error = $"AddComponent failed: {ex.Message}" }); }
+
+        if (added == null)
+            return JsonConvert.SerializeObject(new { error = $"AddComponent returned null for '{componentName}'" });
+
+        EditorUtility.SetDirty(obj);
+        EditorSceneManager.MarkSceneDirty(obj.scene);
+        return JsonConvert.SerializeObject(new { success = true, component = added.GetType().Name });
+    }
+
+    public static string RemoveComponent(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+
+        string componentName = (string)data["component"];
+        if (string.IsNullOrEmpty(componentName))
+            return JsonConvert.SerializeObject(new { error = "component is required" });
+
+        var component = obj.GetComponent(componentName);
+        if (component == null)
+            return JsonConvert.SerializeObject(new { error = $"Component '{componentName}' not found on object" });
+        if (component is Transform)
+            return JsonConvert.SerializeObject(new { error = "Transform cannot be removed" });
+
+        Undo.DestroyObjectImmediate(component);
+        EditorUtility.SetDirty(obj);
+        EditorSceneManager.MarkSceneDirty(obj.scene);
+        return JsonConvert.SerializeObject(new { success = true });
+    }
+
+    public static string FindObject(JObject data)
+    {
+        string path = (string)data["path"];
+        string name = (string)data["name"];
+
+        GameObject obj = null;
+        if (!string.IsNullOrEmpty(path))
+        {
+            obj = GameObject.Find(path);
+        }
+        else if (!string.IsNullOrEmpty(name))
+        {
+            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
+            {
+                obj = FindByNameRecursive(root.transform, name);
+                if (obj != null) break;
+            }
+        }
+        else
+        {
+            return JsonConvert.SerializeObject(new { error = "name or path is required" });
+        }
+
+        if (obj == null)
+            return JsonConvert.SerializeObject(new { error = "GameObject not found" });
+
+        return JsonConvert.SerializeObject(new
+        {
+            id = obj.GetInstanceID(),
+            name = obj.name,
+            path = GetPath(obj)
+        });
+    }
+
+    public static string GetChildren(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+
+        var children = new List<object>();
+        foreach (Transform child in obj.transform)
+        {
+            children.Add(new
+            {
+                id = child.gameObject.GetInstanceID(),
+                name = child.gameObject.name,
+                path = GetPath(child.gameObject)
+            });
+        }
+        return JsonConvert.SerializeObject(new { children });
+    }
+
+    public static string SetParent(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+
+        Transform newParent = null;
+        if (data.TryGetValue("parent_id", out var parentToken) && parentToken.Type != JTokenType.Null)
+        {
+            int parentId;
+            try { parentId = parentToken.ToObject<int>(); }
+            catch { return JsonConvert.SerializeObject(new { error = "parent_id must be an integer" }); }
+
+            var parentGo = EditorUtility.InstanceIDToObject(parentId) as GameObject;
+            if (parentGo == null)
+                return JsonConvert.SerializeObject(new { error = $"Parent GameObject with id {parentId} not found" });
+            newParent = parentGo.transform;
+        }
+
+        bool worldPositionStays = data["world_position_stays"]?.ToObject<bool>() ?? true;
+
+        Undo.SetTransformParent(obj.transform, newParent, "MCP SetParent");
+        if (!worldPositionStays)
+        {
+            Undo.RecordObject(obj.transform, "MCP SetParent (reset local)");
+            obj.transform.localPosition = Vector3.zero;
+            obj.transform.localRotation = Quaternion.identity;
+            obj.transform.localScale = Vector3.one;
+        }
+
+        EditorSceneManager.MarkSceneDirty(obj.scene);
+        return JsonConvert.SerializeObject(new { success = true, path = GetPath(obj) });
+    }
+
+    public static string SetActive(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+        var activeToken = data["active"];
+        if (activeToken == null)
+            return JsonConvert.SerializeObject(new { error = "active is required (bool)" });
+
+        bool active;
+        try { active = activeToken.ToObject<bool>(); }
+        catch { return JsonConvert.SerializeObject(new { error = "active must be a boolean" }); }
+
+        Undo.RecordObject(obj, "MCP SetActive");
+        obj.SetActive(active);
+        EditorSceneManager.MarkSceneDirty(obj.scene);
+        return JsonConvert.SerializeObject(new { success = true, active = obj.activeSelf });
+    }
+
+    public static string SetTag(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+        string tag = (string)data["tag"];
+        if (string.IsNullOrEmpty(tag))
+            return JsonConvert.SerializeObject(new { error = "tag is required" });
+
+        try
+        {
+            Undo.RecordObject(obj, "MCP SetTag");
+            obj.tag = tag;
+            EditorSceneManager.MarkSceneDirty(obj.scene);
+            return JsonConvert.SerializeObject(new { success = true });
+        }
+        catch (UnityException ex)
+        {
+            return JsonConvert.SerializeObject(new { error = $"Tag '{tag}' is not defined: {ex.Message}" });
+        }
+    }
+
+    public static string SetLayer(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+        var layerToken = data["layer"];
+        if (layerToken == null)
+            return JsonConvert.SerializeObject(new { error = "layer is required (int 0-31 or string name)" });
+
+        int layer;
+        if (layerToken.Type == JTokenType.String)
+        {
+            layer = LayerMask.NameToLayer((string)layerToken);
+            if (layer < 0)
+                return JsonConvert.SerializeObject(new { error = $"Layer name '{(string)layerToken}' not found" });
+        }
+        else
+        {
+            try { layer = layerToken.ToObject<int>(); }
+            catch { return JsonConvert.SerializeObject(new { error = "layer must be int or string" }); }
+            if (layer < 0 || layer > 31)
+                return JsonConvert.SerializeObject(new { error = "layer index must be between 0 and 31" });
+        }
+
+        Undo.RecordObject(obj, "MCP SetLayer");
+        obj.layer = layer;
+        EditorSceneManager.MarkSceneDirty(obj.scene);
+        return JsonConvert.SerializeObject(new { success = true, layer, name = LayerMask.LayerToName(layer) });
+    }
+
+    public static string SaveScene(JObject data)
+    {
+        var scene = SceneManager.GetActiveScene();
+        string path = (string)data["path"];
+        bool ok = string.IsNullOrEmpty(path)
+            ? EditorSceneManager.SaveScene(scene)
+            : EditorSceneManager.SaveScene(scene, path);
+
+        return JsonConvert.SerializeObject(new { success = ok, path = scene.path });
+    }
+
+    public static string OpenScene(JObject data)
+    {
+        string path = (string)data["path"];
+        if (string.IsNullOrEmpty(path))
+            return JsonConvert.SerializeObject(new { error = "path is required (e.g. 'Assets/Scenes/Main.unity')" });
+
+        string modeStr = (string)data["mode"] ?? "Single";
+        OpenSceneMode mode;
+        switch (modeStr)
+        {
+            case "Single":                  mode = OpenSceneMode.Single; break;
+            case "Additive":                mode = OpenSceneMode.Additive; break;
+            case "AdditiveWithoutLoading":  mode = OpenSceneMode.AdditiveWithoutLoading; break;
+            default: return JsonConvert.SerializeObject(new { error = $"Unknown mode: {modeStr} (Single|Additive|AdditiveWithoutLoading)" });
+        }
+
+        try
+        {
+            var scene = EditorSceneManager.OpenScene(path, mode);
+            return JsonConvert.SerializeObject(new { success = scene.IsValid(), name = scene.name, path = scene.path });
+        }
+        catch (Exception ex)
+        {
+            return JsonConvert.SerializeObject(new { error = ex.Message });
+        }
+    }
+
+    public static string NewScene(JObject data)
+    {
+        string setupStr = (string)data["setup"] ?? "DefaultGameObjects";
+        NewSceneSetup setup = setupStr == "EmptyScene" ? NewSceneSetup.EmptyScene : NewSceneSetup.DefaultGameObjects;
+
+        try
+        {
+            var scene = EditorSceneManager.NewScene(setup, NewSceneMode.Single);
+            return JsonConvert.SerializeObject(new { success = scene.IsValid(), name = scene.name });
+        }
+        catch (Exception ex)
+        {
+            return JsonConvert.SerializeObject(new { error = ex.Message });
+        }
+    }
+
+    public static string GetSceneInfo()
+    {
+        var scene = SceneManager.GetActiveScene();
+        return JsonConvert.SerializeObject(new
+        {
+            name = scene.name,
+            path = scene.path,
+            is_dirty = scene.isDirty,
+            is_loaded = scene.isLoaded,
+            root_count = scene.rootCount,
+            build_index = scene.buildIndex
+        });
+    }
+
+    public static string SelectObject(JObject data)
+    {
+        if (!TryGetGameObject(data, out var obj, out var error)) return error;
+        bool frame = data["frame"]?.ToObject<bool>() ?? false;
+
+        Selection.activeGameObject = obj;
+        EditorGUIUtility.PingObject(obj);
+        if (frame && SceneView.lastActiveSceneView != null)
+        {
+            SceneView.lastActiveSceneView.FrameSelected();
+        }
+        return JsonConvert.SerializeObject(new { success = true });
+    }
+
+    public static string ExecuteMenuItem(JObject data)
+    {
+        string menuPath = (string)data["menu_path"];
+        if (string.IsNullOrEmpty(menuPath))
+            return JsonConvert.SerializeObject(new { error = "menu_path is required (e.g. 'GameObject/3D Object/Cube')" });
+
+        bool ok = EditorApplication.ExecuteMenuItem(menuPath);
+        return JsonConvert.SerializeObject(new { success = ok });
+    }
+
+    public static string SetPlayMode(JObject data)
+    {
+        string state = (string)data["state"];
+        if (string.IsNullOrEmpty(state))
+            return JsonConvert.SerializeObject(new { error = "state is required: 'play' | 'stop' | 'pause' | 'unpause'" });
+
+        switch (state.ToLowerInvariant())
+        {
+            case "play":    EditorApplication.EnterPlaymode(); break;
+            case "stop":    EditorApplication.ExitPlaymode();  break;
+            case "pause":   EditorApplication.isPaused = true; break;
+            case "unpause": EditorApplication.isPaused = false; break;
+            default: return JsonConvert.SerializeObject(new { error = $"Unknown state '{state}' (play|stop|pause|unpause)" });
+        }
+        return JsonConvert.SerializeObject(new { success = true });
+    }
+
+    public static string GetPlayMode()
+    {
+        return JsonConvert.SerializeObject(new
+        {
+            is_playing   = EditorApplication.isPlaying,
+            is_paused    = EditorApplication.isPaused,
+            is_compiling = EditorApplication.isCompiling,
+            is_updating  = EditorApplication.isUpdatingAssetDatabase
+        });
+    }
+
+    public static string GetConsoleLogs(JObject data)
+    {
+        int limit = data["limit"]?.ToObject<int>() ?? 100;
+        string severity = (string)data["severity"];
+        var entries = McpLogBuffer.Snapshot(limit, severity);
+        return JsonConvert.SerializeObject(new { logs = entries });
+    }
+
+    public static string ClearConsoleLogs()
+    {
+        McpLogBuffer.Clear();
+        return JsonConvert.SerializeObject(new { success = true });
+    }
+
     // -- helpers --
 
     private static bool TryGetGameObject(JObject data, out GameObject obj, out string errorJson)
@@ -483,6 +828,104 @@ internal static class McpCommands
         obj.transform.parent == null
             ? obj.name
             : GetPath(obj.transform.parent.gameObject) + "/" + obj.name;
+
+    private static GameObject FindByNameRecursive(Transform t, string name)
+    {
+        if (t.gameObject.name == name) return t.gameObject;
+        for (int i = 0; i < t.childCount; i++)
+        {
+            var found = FindByNameRecursive(t.GetChild(i), name);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static Type ResolveComponentType(string name)
+    {
+        var direct = Type.GetType(name);
+        if (direct != null && typeof(Component).IsAssignableFrom(direct)) return direct;
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types; }
+            catch { continue; }
+
+            foreach (var t in types)
+            {
+                if (t == null) continue;
+                if (!typeof(Component).IsAssignableFrom(t)) continue;
+                if (t.Name == name || t.FullName == name) return t;
+            }
+        }
+        return null;
+    }
+}
+
+internal static class McpLogBuffer
+{
+    private const int MaxEntries = 1000;
+
+    public class LogEntry
+    {
+        public string time;
+        public string type;
+        public string message;
+        public string stack;
+    }
+
+    private static readonly LinkedList<LogEntry> _entries = new LinkedList<LogEntry>();
+    private static readonly object _lock = new object();
+    private static bool _registered;
+
+    public static void Register()
+    {
+        if (_registered) return;
+        Application.logMessageReceivedThreaded += OnLog;
+        _registered = true;
+    }
+
+    private static void OnLog(string condition, string stackTrace, LogType type)
+    {
+        var entry = new LogEntry
+        {
+            time = DateTime.UtcNow.ToString("o"),
+            type = type.ToString(),
+            message = condition,
+            stack = stackTrace
+        };
+        lock (_lock)
+        {
+            _entries.AddLast(entry);
+            while (_entries.Count > MaxEntries) _entries.RemoveFirst();
+        }
+    }
+
+    public static List<LogEntry> Snapshot(int limit, string severity)
+    {
+        var result = new List<LogEntry>();
+        lock (_lock)
+        {
+            foreach (var e in _entries)
+            {
+                if (!string.IsNullOrEmpty(severity) &&
+                    !string.Equals(e.type, severity, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                result.Add(e);
+            }
+        }
+        if (limit > 0 && result.Count > limit)
+        {
+            result.RemoveRange(0, result.Count - limit);
+        }
+        return result;
+    }
+
+    public static void Clear()
+    {
+        lock (_lock) { _entries.Clear(); }
+    }
 }
 
 public class McpBridgeWindow : EditorWindow
