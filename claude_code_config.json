@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "unity": {
+      "command": "python",
+      "args": ["/percorso/assoluto/unity_mcp_server.py"],
+      "env": {
+        "UNITY_MCP_URL": "http://127.0.0.1:8080",
+        "UNITY_MCP_TOKEN": "PASTE_TOKEN_FROM_UNITY_BRIDGE_PANEL",
+        "UNITY_MCP_TIMEOUT": "10.0"
+      }
+    }
+  }
+}
