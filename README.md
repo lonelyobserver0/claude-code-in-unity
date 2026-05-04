@@ -1,25 +1,34 @@
-# Claude Code ↔ Unity Editor Bridge
+# AI ↔ Unity Editor Bridge
 
-Un ponte MCP (Model Context Protocol) che permette a **Claude Code** di pilotare l'**Editor di Unity** in tempo reale: creare GameObject, modificare componenti, gestire scene, eseguire voci di menu, controllare il Play Mode e leggere i log della Console.
+Un ponte che permette a tool AI (**Claude Code**, **ChatGPT / Codex CLI**, **Cline**, **Aider**, …) di pilotare l'**Editor di Unity** in tempo reale: creare GameObject, modificare componenti, gestire scene, eseguire voci di menu, controllare il Play Mode e leggere i log della Console.
+
+Due interfacce sopra lo stesso bridge HTTP:
+
+- **MCP server** (`unity_mcp_server.py`) — per qualsiasi client MCP-compatibile (Claude Code, Codex CLI, Cline, ChatGPT desktop, …).
+- **CLI diretto** (`unity_cli.py`) — per tool che non parlano MCP ma possono eseguire comandi shell (Aider via `/run`, Makefile, script).
 
 ---
 
 ## Architettura
 
 ```
-┌──────────────────┐    stdio     ┌────────────────────────┐    HTTP loopback     ┌─────────────────────┐
-│   Claude Code    │ ───MCP────▶  │  unity_mcp_server.py   │ ───POST + token ───▶ │   MCPBridge.cs      │
-│   (CLI / IDE)    │              │   (FastMCP, Python)    │                      │  (Unity Editor)     │
-└──────────────────┘              └────────────────────────┘                      └─────────────────────┘
-                                                                                          │
-                                                                                          ▼
-                                                                                   UnityEditor API
+┌──────────────────┐    stdio     ┌────────────────────────┐
+│  Client MCP      │ ───MCP────▶  │  unity_mcp_server.py   │ ─┐
+│ (Claude / Codex  │              │   (FastMCP, Python)    │  │
+│  / Cline / …)    │              └────────────────────────┘  │  HTTP loopback   ┌─────────────────────┐
+└──────────────────┘                                           ├──POST + token ─▶ │   MCPBridge.cs      │
+                                                               │                  │  (Unity Editor)     │
+┌──────────────────┐              ┌────────────────────────┐  │                  └─────────────────────┘
+│ Shell / Aider /  │ ───exec────▶ │     unity_cli.py       │ ─┘                          │
+│ Makefile / curl  │              │   (argparse, Python)   │                             ▼
+└──────────────────┘              └────────────────────────┘                       UnityEditor API
                                                                                    (main thread)
 ```
 
 - **`MCPBridge.cs`** — script Editor Unity. Espone un `HttpListener` su `127.0.0.1:8080` protetto da token. Le richieste vengono accodate ed eseguite sul **main thread** dell'Editor.
-- **`unity_mcp_server.py`** — server MCP (FastMCP) che traduce le tool call di Claude Code in chiamate HTTP verso Unity.
-- **`claude_code_config.json`** — registra il server MCP nel config di Claude Code.
+- **`unity_mcp_server.py`** — server MCP (FastMCP) che traduce tool call MCP in chiamate HTTP verso Unity.
+- **`unity_cli.py`** — CLI diretto sul bridge HTTP per chi non usa MCP. Stessa env config del server MCP.
+- **`claude_code_config.json`** — esempio di registrazione MCP (formato condiviso da più client).
 
 ---
 
@@ -29,8 +38,8 @@ Un ponte MCP (Model Context Protocol) che permette a **Claude Code** di pilotare
 |------------|----------------------|------|
 | Unity Editor | 2021.3 LTS o successiva | Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) richiesto |
 | Python | 3.10+ | tipi generic come `dict[str, Any]` e `\| None` |
-| Claude Code | ultima versione | https://claude.com/claude-code |
-| Pacchetti Python | `mcp`, `httpx` | `pip install mcp httpx` |
+| Client AI | Claude Code / Codex CLI / Cline / Aider / … | vedi sezione *Integrazione client* |
+| Pacchetti Python | `mcp`, `httpx` | `pip install mcp httpx` (per il solo CLI basta `httpx`) |
 
 ---
 
@@ -46,32 +55,15 @@ Un ponte MCP (Model Context Protocol) che permette a **Claude Code** di pilotare
 ### 2. Lato Python
 
 ```bash
-pip install mcp httpx
+pip install mcp httpx        # per il server MCP
+# oppure: pip install httpx  # per il solo CLI (unity_cli.py)
 ```
 
-Posiziona `unity_mcp_server.py` dove preferisci (consigliato un path stabile, es. `~/scripts/unity_mcp_server.py`).
+Posiziona `unity_mcp_server.py` e/o `unity_cli.py` dove preferisci (consigliato un path stabile, es. `~/scripts/`).
 
-### 3. Registra il server in Claude Code
+### 3. Configurazione client
 
-Apri (o crea) il config MCP di Claude Code e aggiungi la voce contenuta in **`claude_code_config.json`**, sostituendo i due placeholder:
-
-```json
-{
-  "mcpServers": {
-    "unity": {
-      "command": "python",
-      "args": ["/PATH/ASSOLUTO/unity_mcp_server.py"],
-      "env": {
-        "UNITY_MCP_URL":   "http://127.0.0.1:8080",
-        "UNITY_MCP_TOKEN": "INCOLLA_QUI_IL_TOKEN_DAL_PANNELLO_UNITY",
-        "UNITY_MCP_TIMEOUT": "10.0"
-      }
-    }
-  }
-}
-```
-
-> Il path effettivo del config dipende dalla piattaforma — vedi la documentazione di Claude Code (`claude mcp` CLI o file `~/.claude/...`).
+La registrazione del server MCP è praticamente identica fra i client (è il [formato standard MCP](https://modelcontextprotocol.io)). Vedi la sezione [**Integrazione client**](#integrazione-client) sotto per i dettagli per Claude Code, ChatGPT/Codex CLI, Cline e Aider.
 
 ---
 
@@ -89,23 +81,25 @@ Apri (o crea) il config MCP di Claude Code e aggiungi la voce contenuta in **`cl
 
 Vedrai nella Console: `[MCP] Listening on http://127.0.0.1:8080 (token saved in EditorPrefs)`.
 
-### Step 2 — Incolla il token nel config di Claude Code
+### Step 2 — Incolla il token nel config del tuo client
 
-Apri il config MCP, sostituisci `INCOLLA_QUI_IL_TOKEN_DAL_PANNELLO_UNITY` con il token copiato e l'URL del path Python. Salva.
+Apri il config MCP del client che usi (vedi [Integrazione client](#integrazione-client)), incolla il token al posto del placeholder e indica il path assoluto a `unity_mcp_server.py`. Salva.
 
-### Step 3 — Riavvia Claude Code
+> Per Aider e altri tool senza MCP, esporta `UNITY_MCP_TOKEN` come env var e usa `unity_cli.py` — vedi [Aider / shell tools](#aider--shell-tools-via-cli-diretto).
 
-Affinché Claude Code carichi il nuovo MCP server.
+### Step 3 — Riavvia il client
+
+Affinché ricarichi il nuovo MCP server.
 
 ### Step 4 — Verifica la connessione
 
-In una sessione Claude Code chiedi:
+Chiedi al tuo client AI:
 
 > *"Fai ping al server Unity"*
 
-Risposta attesa: `{"ok": true}`.
+Risposta attesa: `{"ok": true}`. (Equivalente da shell: `python unity_cli.py ping`.)
 
-A questo punto puoi chiedere a Claude Code cose come:
+A questo punto puoi chiedere cose come:
 
 - *"Crea un cubo rosso chiamato Player a posizione (0, 1, 0)"*
 - *"Aggiungi un Rigidbody a Player con massa 2"*
@@ -151,6 +145,97 @@ A questo punto puoi chiedere a Claude Code cose come:
 | | `get_play_mode()` | Flag: playing, paused, compiling, updating |
 | **Console** | `get_console_logs(limit?, severity?)` | Buffer circolare 1000 entries (`Log`/`Warning`/`Error`/`Exception`/`Assert`) |
 | | `clear_console_logs()` | Svuota il buffer del bridge |
+
+---
+
+## Integrazione client
+
+Lo stesso `unity_mcp_server.py` funziona con qualsiasi client MCP. Cambia solo *dove* incolli il blocco di config. Per i client che non parlano MCP, usa `unity_cli.py` come comando shell.
+
+### Claude Code
+
+File: `~/.claude.json` (o tramite CLI `claude mcp add`).
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "command": "python",
+      "args": ["/PATH/ASSOLUTO/unity_mcp_server.py"],
+      "env": {
+        "UNITY_MCP_URL":     "http://127.0.0.1:8080",
+        "UNITY_MCP_TOKEN":   "INCOLLA_QUI_IL_TOKEN_DAL_PANNELLO_UNITY",
+        "UNITY_MCP_TIMEOUT": "10.0"
+      }
+    }
+  }
+}
+```
+
+### ChatGPT Codex CLI
+
+Codex CLI legge `~/.codex/config.toml`. Aggiungi:
+
+```toml
+[mcp_servers.unity]
+command = "python"
+args    = ["/PATH/ASSOLUTO/unity_mcp_server.py"]
+env     = { UNITY_MCP_URL = "http://127.0.0.1:8080", UNITY_MCP_TOKEN = "INCOLLA_TOKEN", UNITY_MCP_TIMEOUT = "10.0" }
+```
+
+Nella sessione Codex puoi poi invocare i tool `unity.*` (`unity.ping`, `unity.create_object`, …).
+
+### Cline (cline-cli / VS Code)
+
+Cline gestisce i server MCP nel file `cline_mcp_settings.json` (raggiungibile da *MCP Servers → Edit Configuration*). Stesso schema di Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "command": "python",
+      "args": ["/PATH/ASSOLUTO/unity_mcp_server.py"],
+      "env": {
+        "UNITY_MCP_URL":   "http://127.0.0.1:8080",
+        "UNITY_MCP_TOKEN": "INCOLLA_TOKEN"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+### ChatGPT (desktop / web — connettori MCP)
+
+ChatGPT supporta i server MCP come *connectors*. Per un server stdio locale come questo serve di solito un wrapper HTTP/SSE: in alternativa, usa direttamente il CLI nei tool *Code Interpreter* o inquadra le chiamate via `unity_cli.py`.
+
+### Aider / shell tools (via CLI diretto)
+
+Aider non supporta MCP, ma può eseguire comandi shell con `/run`. Esporta una volta le env var nella sessione e poi usa `unity_cli.py`:
+
+```bash
+export UNITY_MCP_URL=http://127.0.0.1:8080
+export UNITY_MCP_TOKEN=...incollato...
+aider
+```
+
+Dentro Aider:
+
+```
+/run python /PATH/ASSOLUTO/unity_cli.py ping
+/run python /PATH/ASSOLUTO/unity_cli.py create_object --type Cube --name Player
+/run python /PATH/ASSOLUTO/unity_cli.py set_transform 12345 --position 0,1,0
+/run python /PATH/ASSOLUTO/unity_cli.py get_console_logs --severity Error --limit 20
+```
+
+Lo stesso CLI è utilizzabile da qualsiasi tool con esecuzione di shell (Makefile, script CI, ricette di task runner). Vedi `python unity_cli.py --help` per la lista completa dei subcomandi. Per endpoint nuovi/non ancora wrappati c'è la fallback `call`:
+
+```bash
+python unity_cli.py call /create_object --json '{"type":"Sphere","name":"Ball"}'
+```
+
+L'exit code è `0` su successo, `1` se la risposta contiene `error`, `2` su errori di trasporto — comodo da usare in script.
 
 ---
 
@@ -228,7 +313,8 @@ get_console_logs(severity="Error") → ultimi errori catturati
 ```
 claude-code-in-unity/
 ├── MCPBridge.cs              # Script Editor Unity (HttpListener + endpoint)
-├── unity_mcp_server.py       # Server MCP Python (FastMCP)
-├── claude_code_config.json   # Esempio di registrazione MCP
+├── unity_mcp_server.py       # Server MCP Python (FastMCP) per client MCP
+├── unity_cli.py              # CLI diretto sul bridge HTTP per tool senza MCP
+├── claude_code_config.json   # Esempio di registrazione MCP (formato condiviso)
 └── README.md                 # Questo file
 ```
