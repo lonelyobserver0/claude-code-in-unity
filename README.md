@@ -143,8 +143,52 @@ A questo punto puoi chiedere cose come:
 | | `execute_menu_item(menu_path)` | **Esegue qualsiasi voce di menu Unity** |
 | **Play mode** | `set_play_mode(state)` | `play` / `stop` / `pause` / `unpause` |
 | | `get_play_mode()` | Flag: playing, paused, compiling, updating |
+| | `wait_for_compile(timeout?, poll_interval?, initial_wait?)` | Polling client-side: ritorna quando Unity ha finito compilazione e asset import. Sopravvive all'assembly reload. |
 | **Console** | `get_console_logs(limit?, severity?)` | Buffer circolare 1000 entries (`Log`/`Warning`/`Error`/`Exception`/`Assert`) |
 | | `clear_console_logs()` | Svuota il buffer del bridge |
+| **Asset** | `import_asset(src_path, dst_path, overwrite?)` | Copia un file da disco dentro `Assets/` e forza l'`AssetDatabase.ImportAsset`. Path validation: `dst_path` deve iniziare con `Assets/` e non può uscirne. |
+
+---
+
+## Workflow: scrivere uno script C# e agganciarlo
+
+L'AI agent può creare un nuovo MonoBehaviour, farlo compilare e attaccarlo a un GameObject senza endpoint dedicati: usa il file-tool nativo del client (Write/Edit) per il file `.cs`, poi orchestra il bridge.
+
+```
+# 1. L'AI scrive Assets/Scripts/Rotator.cs col suo strumento di file
+#    (Claude Code: Write — Codex: shell — Aider: edit normale)
+
+# 2. Forza il reimport e attendi la compilazione
+execute_menu_item("Assets/Refresh")
+wait_for_compile(timeout=60)
+
+# 3. Crea il GameObject (o trovalo) e aggancia il component
+create_object(type="Cube", name="Spinner")  → id
+add_component(id, "Rotator")
+set_component_property(id, "Rotator", "speed", 90.0)
+```
+
+`add_component` risolve il tipo cross-assembly, quindi `Rotator` viene trovato non appena `Assembly-CSharp` è ricompilato.
+
+> ⚠️ **Auto-start consigliato.** L'assembly reload chiude e riapre il listener: senza *Auto-start on load* nel pannello, dopo `Assets/Refresh` il bridge resta giù e `wait_for_compile` va in timeout. `wait_for_compile` tollera già le sconnessioni temporanee durante il reload — purché il bridge riparta da solo.
+>
+> ⚠️ **Solo public.** `set_component_property` lavora solo su field/property `public`. Per esporre parametri inspector-tunable, mantieni `public` o aggiungi getter/setter pubblici accanto al `[SerializeField] private`.
+
+### Workflow Blender → Unity (con MCP Blender separato)
+
+Se usi anche un server MCP per Blender (es. `mcp-blender`), un agent può modellare un asset, esportarlo in `/tmp/Foo.fbx`, e poi consegnarlo a Unity via `import_asset`:
+
+```
+# (in Blender, via il suo MCP)
+execute_blender_code("bpy.ops.export_scene.fbx(filepath='/tmp/Foo.fbx', use_selection=True)")
+
+# (su Unity, via questo bridge)
+import_asset(src_path="/tmp/Foo.fbx", dst_path="Assets/Models/Foo.fbx")
+wait_for_compile()
+instantiate_prefab(path="Assets/Models/Foo.fbx", name="Foo")
+```
+
+Il bridge rifiuta `dst_path` che usciamo da `Assets/` (path-traversal guard).
 
 ---
 

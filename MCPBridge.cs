@@ -275,6 +275,7 @@ public static class McpBridgeServer
             case "/get_play_mode":          return McpCommands.GetPlayMode();
             case "/get_console_logs":       return McpCommands.GetConsoleLogs(data);
             case "/clear_console_logs":     return McpCommands.ClearConsoleLogs();
+            case "/import_asset":           return McpCommands.ImportAsset(data);
             default: return JsonConvert.SerializeObject(new { error = $"Unknown path: {path}" });
         }
     }
@@ -310,7 +311,7 @@ internal static class McpCommands
 
         return JsonConvert.SerializeObject(new
         {
-            id = obj.GetInstanceID(),
+            id = GetId(obj),
             name = obj.name,
             path = GetPath(obj)
         });
@@ -409,7 +410,7 @@ internal static class McpCommands
 
         return JsonConvert.SerializeObject(new
         {
-            id = obj.GetInstanceID(),
+            id = GetId(obj),
             name = obj.name,
             path = GetPath(obj),
             active = obj.activeInHierarchy,
@@ -444,7 +445,7 @@ internal static class McpCommands
 
         return JsonConvert.SerializeObject(new
         {
-            id = instance.GetInstanceID(),
+            id = GetId(instance),
             name = instance.name,
             path = GetPath(instance)
         });
@@ -455,7 +456,7 @@ internal static class McpCommands
         var objects = new List<object>();
         foreach (var r in SceneManager.GetActiveScene().GetRootGameObjects())
         {
-            objects.Add(new { id = r.GetInstanceID(), name = r.name, path = GetPath(r) });
+            objects.Add(new { id = GetId(r), name = r.name, path = GetPath(r) });
         }
         return JsonConvert.SerializeObject(new { objects });
     }
@@ -532,7 +533,7 @@ internal static class McpCommands
 
         return JsonConvert.SerializeObject(new
         {
-            id = obj.GetInstanceID(),
+            id = GetId(obj),
             name = obj.name,
             path = GetPath(obj)
         });
@@ -547,7 +548,7 @@ internal static class McpCommands
         {
             children.Add(new
             {
-                id = child.gameObject.GetInstanceID(),
+                id = GetId(child.gameObject),
                 name = child.gameObject.name,
                 path = GetPath(child.gameObject)
             });
@@ -562,11 +563,11 @@ internal static class McpCommands
         Transform newParent = null;
         if (data.TryGetValue("parent_id", out var parentToken) && parentToken.Type != JTokenType.Null)
         {
-            int parentId;
-            try { parentId = parentToken.ToObject<int>(); }
+            ulong parentId;
+            try { parentId = parentToken.ToObject<ulong>(); }
             catch { return JsonConvert.SerializeObject(new { error = "parent_id must be an integer" }); }
 
-            var parentGo = EditorUtility.InstanceIDToObject(parentId) as GameObject;
+            var parentGo = IdToGameObject(parentId);
             if (parentGo == null)
                 return JsonConvert.SerializeObject(new { error = $"Parent GameObject with id {parentId} not found" });
             newParent = parentGo.transform;
@@ -768,7 +769,7 @@ internal static class McpCommands
             is_playing   = EditorApplication.isPlaying,
             is_paused    = EditorApplication.isPaused,
             is_compiling = EditorApplication.isCompiling,
-            is_updating  = EditorApplication.isUpdatingAssetDatabase
+            is_updating  = EditorApplication.isUpdating
         });
     }
 
@@ -786,7 +787,66 @@ internal static class McpCommands
         return JsonConvert.SerializeObject(new { success = true });
     }
 
+    public static string ImportAsset(JObject data)
+    {
+        string src = (string)data["src_path"];
+        string dst = (string)data["dst_path"];
+        bool overwrite = data["overwrite"]?.ToObject<bool>() ?? false;
+
+        if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
+            return JsonConvert.SerializeObject(new { error = "src_path and dst_path are required" });
+        if (!File.Exists(src))
+            return JsonConvert.SerializeObject(new { error = $"Source file not found: {src}" });
+
+        string dstNorm = dst.Replace('\\', '/').TrimStart('/');
+        if (!dstNorm.StartsWith("Assets/") && dstNorm != "Assets")
+            return JsonConvert.SerializeObject(new { error = "dst_path must be project-relative and start with 'Assets/'" });
+
+        // Resolve to an absolute path under the project's Assets/ and refuse anything that escapes it.
+        string projectAssets = Path.GetFullPath(Application.dataPath);
+        string projectRoot = Path.GetFullPath(Path.Combine(projectAssets, ".."));
+        string fullDst = Path.GetFullPath(Path.Combine(projectRoot, dstNorm));
+        if (!fullDst.StartsWith(projectAssets, StringComparison.Ordinal))
+            return JsonConvert.SerializeObject(new { error = "dst_path escapes the Assets folder" });
+
+        if (File.Exists(fullDst) && !overwrite)
+            return JsonConvert.SerializeObject(new { error = $"Destination already exists at '{dstNorm}' (pass overwrite=true to replace)" });
+
+        try
+        {
+            string parent = Path.GetDirectoryName(fullDst);
+            if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+            File.Copy(src, fullDst, overwrite);
+            AssetDatabase.ImportAsset(dstNorm, ImportAssetOptions.ForceUpdate);
+            return JsonConvert.SerializeObject(new { success = true, path = dstNorm });
+        }
+        catch (Exception ex)
+        {
+            return JsonConvert.SerializeObject(new { error = $"Import failed: {ex.Message}" });
+        }
+    }
+
     // -- helpers --
+
+    // EntityId (Unity 6.3+) replaces InstanceID. The bridge uses ulong as transport so
+    // both branches share the same JSON shape; clients keep passing/receiving a number.
+    private static ulong GetId(UnityEngine.Object obj)
+    {
+#if UNITY_6000_3_OR_NEWER
+        return EntityId.ToULong(obj.GetEntityId());
+#else
+        return unchecked((ulong)(uint)obj.GetInstanceID());
+#endif
+    }
+
+    private static GameObject IdToGameObject(ulong id)
+    {
+#if UNITY_6000_3_OR_NEWER
+        return EditorUtility.EntityIdToObject(EntityId.FromULong(id)) as GameObject;
+#else
+        return EditorUtility.InstanceIDToObject(unchecked((int)(uint)id)) as GameObject;
+#endif
+    }
 
     private static bool TryGetGameObject(JObject data, out GameObject obj, out string errorJson)
     {
@@ -800,15 +860,15 @@ internal static class McpCommands
             return false;
         }
 
-        int id;
-        try { id = idToken.ToObject<int>(); }
+        ulong id;
+        try { id = idToken.ToObject<ulong>(); }
         catch
         {
             errorJson = JsonConvert.SerializeObject(new { error = "id must be an integer" });
             return false;
         }
 
-        obj = EditorUtility.InstanceIDToObject(id) as GameObject;
+        obj = IdToGameObject(id);
         if (obj == null)
         {
             errorJson = JsonConvert.SerializeObject(new { error = $"GameObject with id {id} not found" });

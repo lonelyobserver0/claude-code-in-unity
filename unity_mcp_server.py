@@ -11,6 +11,7 @@ without code changes:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -275,6 +276,39 @@ async def get_play_mode() -> dict[str, Any]:
 
 
 @mcp.tool()
+async def wait_for_compile(
+    timeout: float = 60.0,
+    poll_interval: float = 0.5,
+    initial_wait: float = 0.5,
+) -> dict[str, Any]:
+    """Wait until Unity finishes compiling and reimporting assets.
+
+    Polls `get_play_mode` and returns when both `is_compiling` and `is_updating`
+    are false. Treats transport errors as 'bridge is reloading, keep trying' so
+    it survives the assembly reload that follows `Assets/Refresh`.
+
+    Typical use: after writing a .cs file and calling
+    `execute_menu_item('Assets/Refresh')`, call this before `add_component`.
+
+    Returns {"ok": true, "elapsed": <seconds>} on success,
+    or {"error": "...", "last_response": {...}} on timeout.
+    """
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    await asyncio.sleep(max(0.0, initial_wait))
+
+    last: dict[str, Any] = {}
+    while True:
+        last = await _send("/get_play_mode")
+        if "error" not in last:
+            if not last.get("is_compiling") and not last.get("is_updating"):
+                return {"ok": True, "elapsed": round(loop.time() - started, 2)}
+        if loop.time() - started > timeout:
+            return {"error": f"Timed out after {timeout}s waiting for compile to finish", "last_response": last}
+        await asyncio.sleep(poll_interval)
+
+
+@mcp.tool()
 async def get_console_logs(limit: int = 100, severity: str | None = None) -> dict[str, Any]:
     """Read the most recent Unity console logs captured since the bridge started.
 
@@ -291,6 +325,23 @@ async def get_console_logs(limit: int = 100, severity: str | None = None) -> dic
 async def clear_console_logs() -> dict[str, Any]:
     """Clear the bridge's in-memory log buffer (does not affect Unity's own console)."""
     return await _send("/clear_console_logs")
+
+
+@mcp.tool()
+async def import_asset(src_path: str, dst_path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Copy a file into the Unity project's Assets/ folder and import it.
+
+    src_path: absolute filesystem path of the source file (e.g. '/tmp/Foo.fbx').
+    dst_path: project-relative destination starting with 'Assets/'
+              (e.g. 'Assets/Models/Foo.fbx'). Parent directories are created.
+    overwrite: replace if the destination already exists.
+
+    Triggers AssetDatabase.ImportAsset with ForceUpdate so the asset is
+    immediately usable (e.g. with `instantiate_prefab`).
+    """
+    return await _send("/import_asset", {
+        "src_path": src_path, "dst_path": dst_path, "overwrite": overwrite,
+    })
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any
 
 import httpx
@@ -172,11 +173,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("get_play_mode", help="Return play/pause/compile/asset-update flags.")
 
+    s = sub.add_parser("wait_for_compile", help="Block until Unity is idle (no compile, no asset import). Survives assembly reload.")
+    s.add_argument("--timeout", type=float, default=60.0)
+    s.add_argument("--poll-interval", type=float, default=0.5)
+    s.add_argument("--initial-wait", type=float, default=0.5, help="Grace period before first poll, gives Unity time to start compiling.")
+
     s = sub.add_parser("get_console_logs", help="Read captured Unity console logs.")
     s.add_argument("--limit", type=int, default=100)
     s.add_argument("--severity", choices=["Log", "Warning", "Error", "Exception", "Assert"])
 
     sub.add_parser("clear_console_logs", help="Clear the bridge's in-memory log buffer.")
+
+    s = sub.add_parser("import_asset", help="Copy a file into the project's Assets/ and import it.")
+    s.add_argument("src_path", help="Absolute filesystem path of the source file.")
+    s.add_argument("dst_path", help="Project-relative destination, must start with 'Assets/'.")
+    s.add_argument("--overwrite", action="store_true")
 
     s = sub.add_parser("call", help="Escape hatch: POST raw JSON to an arbitrary bridge path.")
     s.add_argument("path", help="e.g. /create_object")
@@ -286,6 +297,19 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if cmd == "get_play_mode":
         return _send("/get_play_mode")
 
+    if cmd == "wait_for_compile":
+        started = time.monotonic()
+        time.sleep(max(0.0, args.initial_wait))
+        last: dict[str, Any] = {}
+        while True:
+            last = _send("/get_play_mode")
+            if "error" not in last:
+                if not last.get("is_compiling") and not last.get("is_updating"):
+                    return {"ok": True, "elapsed": round(time.monotonic() - started, 2)}
+            if time.monotonic() - started > args.timeout:
+                return {"error": f"Timed out after {args.timeout}s waiting for compile to finish", "last_response": last}
+            time.sleep(args.poll_interval)
+
     if cmd == "get_console_logs":
         payload = {"limit": args.limit}
         if args.severity is not None: payload["severity"] = args.severity
@@ -293,6 +317,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
 
     if cmd == "clear_console_logs":
         return _send("/clear_console_logs")
+
+    if cmd == "import_asset":
+        return _send("/import_asset", {
+            "src_path": args.src_path, "dst_path": args.dst_path, "overwrite": args.overwrite,
+        })
 
     if cmd == "call":
         path = args.path if args.path.startswith("/") else "/" + args.path
